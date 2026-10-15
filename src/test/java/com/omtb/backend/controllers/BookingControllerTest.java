@@ -1,6 +1,7 @@
 package com.omtb.backend.controllers;
 
 import com.omtb.backend.models.Booking;
+import com.omtb.backend.models.FoodOrderItem;
 import com.omtb.backend.repositories.BookingRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -10,9 +11,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
+import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -148,6 +150,131 @@ class BookingControllerTest {
                         List.of(new BookingController.SeatChange("C1", "C2"))));
 
         assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
+    }
+
+    @Test
+    void createBookingWithFoodItemsCalculatesTotalsAndSetsConfirmedStatus() {
+        Booking booking = booking("booking-food", List.of("A1"), 0.0);
+        booking.setTicketTotal(200.0);
+        booking.setFoodItems(List.of(
+                new FoodOrderItem("food-1", "Caramel Popcorn", 150.0, 2, "img1", "Popcorn"),
+                new FoodOrderItem("food-2", "Pepsi", 50.0, 1, "img2", "Beverages")
+        ));
+        booking.setTax(27.5);
+        when(bookingRepository.findByMovieIdAndTheaterAndDateAndTime(
+                "movie-1", "INOX", "2026-10-10", "06:31 PM - 09:31 PM"))
+                .thenReturn(List.of());
+        when(bookingRepository.save(booking)).thenReturn(booking);
+
+        ResponseEntity<?> response = bookingController.createBooking(booking);
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals(350.0, booking.getFoodTotal());
+        assertEquals(577.5, booking.getTotal());
+        assertEquals("CONFIRMED", booking.getStatus());
+        verify(bookingRepository).save(booking);
+    }
+
+    @Test
+    void cancelBookingFutureShowCalculates15PercentFeeAndRefunds85Percent() {
+        Booking booking = booking("booking-cancel", List.of("A1", "A2"), 500.0);
+        booking.setDate(LocalDate.now().plusDays(2).toString());
+        booking.setTime("08:00 PM");
+        booking.setStatus("CONFIRMED");
+        when(bookingRepository.findById("booking-cancel")).thenReturn(Optional.of(booking));
+        when(bookingRepository.save(booking)).thenReturn(booking);
+
+        ResponseEntity<?> response = bookingController.cancelBooking(
+                "booking-cancel",
+                new BookingController.CancelBookingRequest("ALL"));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        BookingController.CancelBookingResponse body =
+                assertInstanceOf(BookingController.CancelBookingResponse.class, response.getBody());
+        assertEquals("CANCELLED", body.status());
+        assertEquals(500.0, body.originalAmount());
+        assertEquals(75.0, body.cancellationFee()); // 15% of 500
+        assertEquals(425.0, body.refundAmount());    // 85% of 500
+        assertEquals("CANCELLED", booking.getStatus());
+        assertEquals(425.0, booking.getRefundAmount());
+        assertEquals(75.0, booking.getCancellationFee());
+    }
+
+    @Test
+    void cancelBookingPastShowIsRejectedWith400() {
+        Booking booking = booking("booking-past", List.of("A1"), 200.0);
+        booking.setDate("2020-01-01");
+        booking.setTime("10:00 AM");
+        when(bookingRepository.findById("booking-past")).thenReturn(Optional.of(booking));
+
+        ResponseEntity<?> response = bookingController.cancelBooking(
+                "booking-past",
+                new BookingController.CancelBookingRequest("ALL"));
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        verify(bookingRepository, never()).save(booking);
+    }
+
+    @Test
+    void cancelBookingAlreadyCancelledIsRejectedWith400() {
+        Booking booking = booking("booking-done", List.of("A1"), 200.0);
+        booking.setDate(LocalDate.now().plusDays(3).toString());
+        booking.setTime("07:00 PM");
+        booking.setStatus("CANCELLED");
+        when(bookingRepository.findById("booking-done")).thenReturn(Optional.of(booking));
+
+        ResponseEntity<?> response = bookingController.cancelBooking(
+                "booking-done",
+                new BookingController.CancelBookingRequest("ALL"));
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        verify(bookingRepository, never()).save(booking);
+    }
+
+    @Test
+    void cancelFoodOnlyCancelsFoodAndRefundsPortionMinusFee() {
+        Booking booking = booking("booking-food-cancel", List.of("A1"), 600.0);
+        booking.setDate(LocalDate.now().plusDays(2).toString());
+        booking.setTime("06:00 PM");
+        booking.setStatus("CONFIRMED");
+        booking.setFoodTotal(200.0);
+        booking.setFoodItems(new ArrayList<>(List.of(
+                new FoodOrderItem("food-1", "Popcorn", 200.0, 1, "img", "Popcorn")
+        )));
+        when(bookingRepository.findById("booking-food-cancel")).thenReturn(Optional.of(booking));
+        when(bookingRepository.save(booking)).thenReturn(booking);
+
+        ResponseEntity<?> response = bookingController.cancelBooking(
+                "booking-food-cancel",
+                new BookingController.CancelBookingRequest("FOOD_ONLY"));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        BookingController.CancelBookingResponse body =
+                assertInstanceOf(BookingController.CancelBookingResponse.class, response.getBody());
+        assertEquals("FOOD_CANCELLED", body.status());
+        assertEquals(200.0, body.originalAmount());
+        assertEquals(30.0, body.cancellationFee()); // 15% of 200
+        assertEquals(170.0, body.refundAmount());   // 85% of 200
+        assertEquals(400.0, booking.getTotal());
+        assertEquals(0.0, booking.getFoodTotal());
+    }
+
+    @Test
+    void getBookedSeatsIgnoresCancelledBookingsReleasingSeatsBack() {
+        Booking active = booking("b-1", List.of("A1", "A2"), 400.0);
+        active.setStatus("CONFIRMED");
+        Booking cancelled = booking("b-2", List.of("A3", "A4"), 400.0);
+        cancelled.setStatus("CANCELLED");
+
+        when(bookingRepository.findByMovieIdAndTheaterAndDateAndTime(
+                "movie-1", "INOX", "2026-10-10", "06:31 PM - 09:31 PM"))
+                .thenReturn(List.of(active, cancelled));
+
+        ResponseEntity<List<String>> response = bookingController.getBookedSeats(
+                "movie-1", "INOX", "2026-10-10", "06:31 PM - 09:31 PM");
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        assertEquals(List.of("A1", "A2"), response.getBody());
     }
 
     private Booking booking(String id, List<String> seats, double total) {

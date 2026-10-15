@@ -28,4 +28,16 @@ public class Booking {
     private String userName;
     private String userEmail;
     private String bookedAt;
+
+    // Food booking & pricing fields
+    private List<FoodOrderItem> foodItems;
+    private Double foodTotal;
+    private Double ticketTotal;
+    private Double tax;
+
+    // Status & Refund policy fields
+    private String status; // "CONFIRMED", "CANCELLED", "FOOD_CANCELLED"
+    private Double refundAmount;
+    private Double cancellationFee;
+    private String cancelledAt;
 }
