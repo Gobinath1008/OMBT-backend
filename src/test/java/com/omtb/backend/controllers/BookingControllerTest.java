@@ -277,6 +277,91 @@ class BookingControllerTest {
         assertEquals(List.of("A1", "A2"), response.getBody());
     }
 
+    @Test
+    void modifyFoodWithHigherAmountCalculatesExtraBillAndUpdatesTotal() {
+        Booking booking = booking("booking-food-mod", List.of("A1"), 500.0);
+        booking.setDate(LocalDate.now().plusDays(2).toString());
+        booking.setTime("07:00 PM");
+        booking.setStatus("CONFIRMED");
+        booking.setFoodTotal(200.0);
+        booking.setFoodItems(new ArrayList<>(List.of(
+                new FoodOrderItem("food-1", "Popcorn", 200.0, 1, "img", "Popcorn")
+        )));
+
+        when(bookingRepository.findById("booking-food-mod")).thenReturn(Optional.of(booking));
+        when(bookingRepository.save(booking)).thenReturn(booking);
+
+        // Change to food items worth 350.0 (extra 150.0)
+        List<FoodOrderItem> updatedItems = List.of(
+                new FoodOrderItem("food-1", "Popcorn", 200.0, 1, "img", "Popcorn"),
+                new FoodOrderItem("food-2", "Pepsi", 75.0, 2, "img2", "Beverages") // 150.0
+        );
+
+        ResponseEntity<?> response = bookingController.modifyFood(
+                "booking-food-mod",
+                new BookingController.ModifyFoodRequest(updatedItems));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        BookingController.ModifyFoodResponse body =
+                assertInstanceOf(BookingController.ModifyFoodResponse.class, response.getBody());
+        assertEquals(200.0, body.previousFoodTotal());
+        assertEquals(350.0, body.newFoodTotal());
+        assertEquals(150.0, body.priceDifference());
+        assertEquals(150.0, body.extraToPay());
+        assertEquals(0.0, body.refundAmount());
+        assertEquals(350.0, booking.getFoodTotal());
+        assertEquals(650.0, booking.getTotal()); // 500 + 150 extra bill
+        verify(bookingRepository).save(booking);
+    }
+
+    @Test
+    void modifyFoodWithLowerAmountCalculatesRefundAndUpdatesTotal() {
+        Booking booking = booking("booking-food-mod2", List.of("A1"), 600.0);
+        booking.setDate(LocalDate.now().plusDays(2).toString());
+        booking.setTime("07:00 PM");
+        booking.setStatus("CONFIRMED");
+        booking.setFoodTotal(300.0);
+
+        when(bookingRepository.findById("booking-food-mod2")).thenReturn(Optional.of(booking));
+        when(bookingRepository.save(booking)).thenReturn(booking);
+
+        // Lower to 120.0
+        List<FoodOrderItem> updatedItems = List.of(
+                new FoodOrderItem("food-3", "Fries", 120.0, 1, "img3", "Snacks")
+        );
+
+        ResponseEntity<?> response = bookingController.modifyFood(
+                "booking-food-mod2",
+                new BookingController.ModifyFoodRequest(updatedItems));
+
+        assertEquals(HttpStatus.OK, response.getStatusCode());
+        BookingController.ModifyFoodResponse body =
+                assertInstanceOf(BookingController.ModifyFoodResponse.class, response.getBody());
+        assertEquals(300.0, body.previousFoodTotal());
+        assertEquals(120.0, body.newFoodTotal());
+        assertEquals(-180.0, body.priceDifference());
+        assertEquals(0.0, body.extraToPay());
+        assertEquals(180.0, body.refundAmount());
+        assertEquals(120.0, booking.getFoodTotal());
+        assertEquals(420.0, booking.getTotal()); // 600 - 180 refund
+        verify(bookingRepository).save(booking);
+    }
+
+    @Test
+    void modifyFoodPastShowIsRejectedWith400() {
+        Booking booking = booking("booking-food-past", List.of("A1"), 500.0);
+        booking.setDate("2020-01-01");
+        booking.setTime("10:00 AM");
+        when(bookingRepository.findById("booking-food-past")).thenReturn(Optional.of(booking));
+
+        ResponseEntity<?> response = bookingController.modifyFood(
+                "booking-food-past",
+                new BookingController.ModifyFoodRequest(List.of()));
+
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        verify(bookingRepository, never()).save(booking);
+    }
+
     private Booking booking(String id, List<String> seats, double total) {
         Booking booking = new Booking();
         booking.setId(id);

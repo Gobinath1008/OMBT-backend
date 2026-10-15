@@ -1,6 +1,7 @@
 package com.omtb.backend.controllers;
 
 import com.omtb.backend.models.Booking;
+import com.omtb.backend.models.FoodOrderItem;
 import com.omtb.backend.repositories.BookingRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.CacheControl;
@@ -48,6 +49,17 @@ public class BookingController {
             double refundAmount,
             String message,
             Booking booking) {}
+
+    public record ModifyFoodRequest(List<FoodOrderItem> foodItems) {}
+
+    public record ModifyFoodResponse(
+            Booking booking,
+            double previousFoodTotal,
+            double newFoodTotal,
+            double priceDifference,
+            double extraToPay,
+            double refundAmount,
+            String message) {}
 
     @GetMapping("/seats")
     public ResponseEntity<List<String>> getBookedSeats(
@@ -235,6 +247,87 @@ public class BookingController {
                 refundAmount,
                 "Booking cancelled successfully. A refund of ₹" + refundAmount + " has been processed.",
                 saved));
+    }
+
+    /**
+     * Endpoint allowing customers to edit/change food details for an active booking.
+     * If new food amount > previous food amount -> extra bill is calculated and added to the booking.
+     * If new food amount < previous food amount -> refund is calculated and returned.
+     * Time constraint: strictly before show starts.
+     */
+    @PatchMapping("/{bookingId}/modify-food")
+    public ResponseEntity<?> modifyFood(
+            @PathVariable String bookingId,
+            @RequestBody ModifyFoodRequest request) {
+
+        Booking booking = bookingRepository.findById(bookingId).orElse(null);
+        if (booking == null) {
+            return ResponseEntity.notFound().build();
+        }
+
+        if ("CANCELLED".equalsIgnoreCase(booking.getStatus())) {
+            return badRequest("Cannot edit food details for a cancelled booking.");
+        }
+
+        // Validate time constraint: editing food is only allowed before show start date and time
+        LocalDateTime showDateTime = parseShowDateTime(booking.getDate(), booking.getTime());
+        if (showDateTime != null && !LocalDateTime.now().isBefore(showDateTime)) {
+            return badRequest("Food cannot be modified. The show date and time has already started or passed.");
+        }
+
+        List<FoodOrderItem> newItems = (request != null && request.foodItems() != null)
+                ? request.foodItems().stream().filter(item -> item != null && item.getQuantity() != null && item.getQuantity() > 0).collect(Collectors.toList())
+                : new ArrayList<>();
+
+        double previousFoodTotal = booking.getFoodTotal() != null ? booking.getFoodTotal() : 0.0;
+        double newFoodTotal = newItems.stream()
+                .mapToDouble(i -> (i.getPrice() != null ? i.getPrice() : 0.0) * (i.getQuantity() != null ? i.getQuantity() : 1))
+                .sum();
+        newFoodTotal = Math.round(newFoodTotal * 100.0) / 100.0;
+
+        double priceDifference = Math.round((newFoodTotal - previousFoodTotal) * 100.0) / 100.0;
+        double extraToPay = Math.max(0.0, priceDifference);
+        double refundAmount = Math.max(0.0, -priceDifference);
+
+        // Update food items and foodTotal
+        booking.setFoodItems(newItems);
+        booking.setFoodTotal(newFoodTotal);
+
+        // Adjust grand total
+        double currentTotal = booking.getTotal() != null ? booking.getTotal() : 0.0;
+        double updatedTotal = Math.max(0.0, Math.round((currentTotal + priceDifference) * 100.0) / 100.0);
+        booking.setTotal(updatedTotal);
+
+        // If status was FOOD_CANCELLED but user added food, reactivate to CONFIRMED
+        if ("FOOD_CANCELLED".equalsIgnoreCase(booking.getStatus()) && newFoodTotal > 0.0) {
+            booking.setStatus("CONFIRMED");
+        } else if (newFoodTotal == 0.0 && previousFoodTotal > 0.0 && !"CANCELLED".equalsIgnoreCase(booking.getStatus())) {
+            booking.setStatus("FOOD_CANCELLED");
+        }
+
+        if (refundAmount > 0.0) {
+            booking.setRefundAmount((booking.getRefundAmount() != null ? booking.getRefundAmount() : 0.0) + refundAmount);
+        }
+
+        Booking saved = bookingRepository.save(booking);
+
+        String message;
+        if (extraToPay > 0.0) {
+            message = "Food order updated successfully! Extra amount of ₹" + extraToPay + " has been added to your bill.";
+        } else if (refundAmount > 0.0) {
+            message = "Food order updated successfully! A refund of ₹" + refundAmount + " has been processed.";
+        } else {
+            message = "Food order updated successfully with no price change.";
+        }
+
+        return ResponseEntity.ok(new ModifyFoodResponse(
+                saved,
+                previousFoodTotal,
+                newFoodTotal,
+                priceDifference,
+                extraToPay,
+                refundAmount,
+                message));
     }
 
     @PatchMapping("/{bookingId}/modify")
